@@ -83,9 +83,11 @@ class GiftiaExToolMainTests(unittest.IsolatedAsyncioTestCase):
         self.tmp_dir = tempfile.TemporaryDirectory()
         self.mock_context = MagicMock()
         self.config = {
-            "inspect_user_avatar_enabled": True,
-            "caption_provider_ids": ["provider_1", "provider_2"],
-            "auto_sync_to_giftia": True,
+            "avatar_config": {
+                "inspect_user_avatar_enabled": True,
+                "caption_provider_ids": ["provider_1", "provider_2"],
+                "auto_sync_to_giftia": True,
+            }
         }
         with patch("astrbot.api.star.StarTools.get_data_dir", return_value=self.tmp_dir.name):
             self.plugin = GiftiaExTool(self.mock_context, self.config)
@@ -142,7 +144,7 @@ class GiftiaExToolMainTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cached, "阳光开朗的柴犬特写，笑容灿烂")
 
     async def test_tool_disabled_check(self):
-        self.plugin.conf["inspect_user_avatar_enabled"] = False
+        self.plugin.conf["avatar_config"]["inspect_user_avatar_enabled"] = False
         res = await self.plugin.inspect_user_avatar(event=MagicMock(), user_id="123")
         self.assertIn("未启用", res)
 

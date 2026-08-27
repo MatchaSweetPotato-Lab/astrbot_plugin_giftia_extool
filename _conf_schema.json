@@ -1,21 +1,28 @@
 {
-  "inspect_user_avatar_enabled": {
-    "description": "启用头像查看工具",
-    "type": "bool",
-    "default": true,
-    "hint": "开启后，大模型可在需要时调用 inspect_user_avatar 工具查看指定用户的头像特征。"
-  },
-  "caption_provider_ids": {
-    "type": "list",
-    "description": "视觉模型提供商（按优先级多选）",
-    "_special": "select_providers",
-    "default": [],
-    "hint": "选择用于头像分析的视觉大模型。若配置多个，第一个失败时会自动降级尝试后面的提供商。留空则使用当前默认视觉模型。"
-  },
-  "auto_sync_to_giftia": {
-    "description": "自动写入 Giftia 画像",
-    "type": "bool",
-    "default": true,
-    "hint": "开启后，转述生成的头像描述将自动同步写入 Giftia 插件的用户画像库中（需同时加载 Giftia 插件）。"
+  "avatar_config": {
+    "description": "头像查看工具配置",
+    "type": "object",
+    "hint": "用于配置 inspect_user_avatar 工具的开关、视觉模型提供商与画像同步行为。",
+    "items": {
+      "inspect_user_avatar_enabled": {
+        "description": "启用头像查看工具",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，大模型可在需要时调用 inspect_user_avatar 工具查看指定用户的头像特征。"
+      },
+      "caption_provider_ids": {
+        "type": "list",
+        "description": "视觉模型提供商（按优先级多选）",
+        "_special": "select_providers",
+        "default": [],
+        "hint": "选择用于头像分析的视觉大模型。若配置多个，第一个失败时会自动降级尝试后面的提供商。留空则使用当前默认视觉模型。"
+      },
+      "auto_sync_to_giftia": {
+        "description": "自动写入 Giftia 画像",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，转述生成的头像描述将自动同步写入 Giftia 插件的用户画像库中（需同时加载 Giftia 插件）。"
+      }
+    }
   }
 }

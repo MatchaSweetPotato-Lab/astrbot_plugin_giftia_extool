@@ -31,12 +31,36 @@ class GiftiaExTool(Star):
         self.db = AvatarCacheDB(db_path)
         self.fetcher = AvatarFetcher(self.context)
 
+    def _get_avatar_conf(self) -> dict:
+        """获取头像工具相关配置"""
+        if isinstance(self.conf, dict):
+            return self.conf.get("avatar_config", {})
+        return {}
+
+    def _is_tool_enabled(self) -> bool:
+        avatar_conf = self._get_avatar_conf()
+        if "inspect_user_avatar_enabled" in avatar_conf:
+            return bool(avatar_conf.get("inspect_user_avatar_enabled", True))
+        return bool(self.conf.get("inspect_user_avatar_enabled", True))
+
+    def _get_caption_provider_ids(self) -> list[str]:
+        avatar_conf = self._get_avatar_conf()
+        if "caption_provider_ids" in avatar_conf:
+            return avatar_conf.get("caption_provider_ids", [])
+        return self.conf.get("caption_provider_ids", [])
+
+    def _is_auto_sync_enabled(self) -> bool:
+        avatar_conf = self._get_avatar_conf()
+        if "auto_sync_to_giftia" in avatar_conf:
+            return bool(avatar_conf.get("auto_sync_to_giftia", True))
+        return bool(self.conf.get("auto_sync_to_giftia", True))
+
     async def initialize(self):
         """插件初始化"""
         await self.db.initialize()
 
         # 根据配置动态开启/关闭工具
-        enabled = self.conf.get("inspect_user_avatar_enabled", True)
+        enabled = self._is_tool_enabled()
         if enabled:
             if hasattr(self.context, "activate_llm_tool"):
                 try:
@@ -72,7 +96,7 @@ class GiftiaExTool(Star):
         if not clean_user_id:
             return "查看头像失败：未提供有效的 user_id"
 
-        if not self.conf.get("inspect_user_avatar_enabled", True):
+        if not self._is_tool_enabled():
             return "头像查看工具当前未启用。"
 
         # 尝试解析会话信息（用于 Giftia 画像同步）
@@ -91,7 +115,7 @@ class GiftiaExTool(Star):
             if cached_desc:
                 logger.info(f"[Giftia ExTool] 命中本地头像缓存: user_id={clean_user_id}")
                 # 尝试同步至 Giftia 画像
-                if self.conf.get("auto_sync_to_giftia", True):
+                if self._is_auto_sync_enabled():
                     await sync_avatar_to_giftia(
                         user_id=clean_user_id,
                         avatar_description=cached_desc,
@@ -109,7 +133,7 @@ class GiftiaExTool(Star):
             return f"获取用户 {clean_user_id} 的头像图片失败（可能受网络或平台限制影响）。"
 
         # 3. 调用视觉大模型转述
-        providers = self.conf.get("caption_provider_ids", [])
+        providers = self._get_caption_provider_ids()
         desc = await self.fetcher.caption_avatar_with_llm(
             image_bytes=image_bytes,
             provider_ids=providers,
@@ -126,7 +150,7 @@ class GiftiaExTool(Star):
         logger.info(f"[Giftia ExTool] 用户 {clean_user_id} 的头像描述已更新至本地缓存表。")
 
         # 5. 自动同步写入 Giftia 用户画像
-        if self.conf.get("auto_sync_to_giftia", True):
+        if self._is_auto_sync_enabled():
             await sync_avatar_to_giftia(
                 user_id=clean_user_id,
                 avatar_description=desc,
