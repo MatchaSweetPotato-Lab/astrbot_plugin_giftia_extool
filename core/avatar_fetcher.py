@@ -29,19 +29,34 @@ class AvatarFetcher:
         user_id: str,
         event: AstrMessageEvent | None = None,
     ) -> tuple[bytes | None, str]:
-        """Download and validate an avatar, using one stable QQ image size.
+        """Download and validate an avatar using a platform-specific URL.
 
         Args:
             user_id: Target account ID.
-            event: Optional source event for platforms exposing an avatar URL.
+            event: Source event providing the QQ app ID or sender avatar URL.
 
         Returns:
             Image bytes and source URL, or (None, "") on failure.
         """
         clean_user_id = str(user_id or "").strip()
+        if not clean_user_id:
+            return None, ""
         avatar_urls = []
 
         platform_name = getattr(getattr(event, "platform_meta", None), "name", "")
+        if platform_name in {"qq_official", "qq_official_webhook"}:
+            platform = getattr(getattr(event, "bot", None), "platform", None)
+            appid = getattr(platform, "appid", None)
+            if appid:
+                avatar_urls.append(
+                    f"https://q.qlogo.cn/qqapp/{appid}/{clean_user_id}/0"
+                )
+            else:
+                logger.warning(
+                    "[Giftia ExTool] QQ official bot appid unavailable; "
+                    "cannot build avatar URL."
+                )
+
         if clean_user_id.isdecimal() and (
             event is None or platform_name == "aiocqhttp"
         ):
@@ -52,6 +67,9 @@ class AvatarFetcher:
                 sender_avatar = getattr(sender, "avatar", None)
                 if sender_avatar:
                     avatar_urls.append(sender_avatar)
+
+        if not avatar_urls:
+            return None, ""
 
         headers = {
             "User-Agent": (
