@@ -1,6 +1,6 @@
 name: astrbot_plugin_giftia_extool
 display_name: Giftia ExTool
 desc: 支持 giftia 的更多 llm 工具
-version: 1.0.0
+version: 1.0.1
 author: e.e.
 repo: https://github.com/MatchaSweetPotato-Lab/astrbot_plugin_giftia_extool

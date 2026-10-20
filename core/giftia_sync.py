@@ -59,7 +59,7 @@ async def sync_avatar_to_giftia(
 
     try:
         if existing_only:
-            async with giftia.db.conn.execute(
+            async with giftia.db.query(
                 "SELECT 1 FROM user_profiles WHERE bot_name = ? AND user_id = ?",
                 (bot_name, user_id),
             ) as cursor:

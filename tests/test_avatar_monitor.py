@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from io import BytesIO
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import aiosqlite
 import pytest
 import pytest_asyncio
+from aiosqlite.context import contextmanager
 from PIL import Image
 
 from core.avatar_fetcher import AvatarFetcher
@@ -66,7 +68,7 @@ async def runtime(tmp_path, monkeypatch):
 
     writer = AsyncMock(side_effect=write_profile)
     giftia = SimpleNamespace(
-        db=SimpleNamespace(conn=conn),
+        db=SimpleNamespace(conn=conn, query=conn.execute),
         data_cache=SimpleNamespace(set_user_profile=writer),
         bot_map={
             "bot-a": {"adapter_ids": ["qq-a"]},
@@ -133,6 +135,90 @@ async def runtime(tmp_path, monkeypatch):
     finally:
         await cache.close()
         await conn.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reader_prefix",
+    [
+        "SELECT DISTINCT up.bot_name, up.user_id",
+        "SELECT avatar_description FROM user_profiles",
+        "SELECT 1 FROM user_profiles",
+    ],
+)
+async def test_shared_writer_waits_until_avatar_reader_closes(
+    runtime, monkeypatch, reader_prefix
+):
+    """Keep concurrent writes outside each avatar reader's cursor lifetime.
+
+    Args:
+        runtime: Avatar cache and Giftia database test runtime.
+        monkeypatch: Fixture for installing the serialized query interface.
+        reader_prefix: Avatar query whose open cursor should block the writer.
+    """
+    rt = runtime
+    await rt.seed("10001")
+    lock = asyncio.Lock()
+    reading, release = asyncio.Event(), asyncio.Event()
+    writer_started, writer_entered = asyncio.Event(), asyncio.Event()
+    original_execute = rt.conn.execute
+
+    @contextmanager
+    async def paused_execute(sql, parameters=()):
+        cursor = await original_execute(sql, parameters)
+        if sql.lstrip().startswith(reader_prefix):
+            reading.set()
+            await release.wait()
+        return cursor
+
+    @asynccontextmanager
+    async def query(sql, parameters=()):
+        # Model Giftia's query ownership through cursor closure.
+        async with lock:
+            async with rt.conn.execute(sql, parameters) as cursor:
+                yield cursor
+
+    async def write_profile():
+        writer_started.set()
+        async with lock:
+            writer_entered.set()
+            await rt.write_profile(
+                bot_name="bot-a",
+                user_id="10002",
+                profile_fields={"avatar_description": "concurrent writer"},
+            )
+
+    monkeypatch.setattr(rt.conn, "execute", paused_execute)
+    monkeypatch.setattr(rt.giftia.db, "query", query)
+    operation = (
+        sync_avatar_to_giftia(
+            "10001", "caption", "bot-a", existing_only=True, giftia=rt.giftia
+        )
+        if reader_prefix == "SELECT 1 FROM user_profiles"
+        else rt.run_check()
+    )
+    reader = asyncio.create_task(operation)
+    writer = None
+    try:
+        await asyncio.wait_for(reading.wait(), timeout=2)
+        writer = asyncio.create_task(write_profile())
+        await asyncio.wait_for(writer_started.wait(), timeout=2)
+        assert not writer_entered.is_set()
+    finally:
+        release.set()
+        results = await asyncio.wait_for(
+            asyncio.gather(reader, *([writer] if writer else [])), timeout=2
+        )
+
+    assert writer_entered.is_set()
+    if reader_prefix == "SELECT 1 FROM user_profiles":
+        assert results[0] is True
+    else:
+        assert results[0]["filled"] == 1 and results[0]["failed"] == 0
+    async with rt.conn.execute(
+        "SELECT avatar_description FROM user_profiles WHERE user_id='10002'"
+    ) as cursor:
+        assert (await cursor.fetchone())[0] == "concurrent writer"
 
 
 @pytest.mark.asyncio

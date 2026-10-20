@@ -66,7 +66,7 @@ async def check_active_avatars(
     local_start = start.astimezone().strftime("%Y-%m-%d %H:%M:%S")
     local_end = end.astimezone().strftime("%Y-%m-%d %H:%M:%S")
     placeholders = ",".join("?" for _ in bot_names)
-    async with giftia.db.conn.execute(
+    async with giftia.db.query(
         f"""
         SELECT DISTINCT up.bot_name, up.user_id
         FROM chat_history ch
@@ -136,7 +136,7 @@ async def check_active_avatars(
 
             for bot_name in owning_bots:
                 try:
-                    async with giftia.db.conn.execute(
+                    async with giftia.db.query(
                         "SELECT avatar_description FROM user_profiles "
                         "WHERE bot_name = ? AND user_id = ?",
                         (bot_name, user_id),
