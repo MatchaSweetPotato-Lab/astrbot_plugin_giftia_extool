@@ -24,7 +24,7 @@
 
 - 🖼️ **用户头像特征智能分析 (`inspect_user_avatar`)**
   - 支持大模型在对话中根据意图自主触发工具调用。
-  - 自动解析目标用户的头像图片（支持 QQ 高清/标清及多平台会话头像）。
+  - 自动解析目标用户的头像图片（支持 OneBot / NapCat、QQ 官方机器人 WebSocket / Webhook 及多平台会话头像）。
   - 调用视觉多模态大模型进行精炼的视觉特征转述（精准识别二次元角色、真人自拍、萌宠、风景、表情包、画风与神态等）。
 
 - ⚡ **本地 SQLite 异步高命中缓存**
@@ -103,6 +103,8 @@ git clone https://github.com/MatchaSweetPotato-Lab/astrbot_plugin_giftia_extool.
 | `user_id` | `string` | 否 | `""` | 目标用户的数字ID / QQ号 / 唯一标识。若为空则缺省使用发送者 ID |
 | `force_refresh` | `bool` | 否 | `false` | 是否强制重新下载头像并调用大模型转述（为 `false` 且已有缓存时直接返回缓存） |
 
+QQ 官方机器人（`qq_official` / `qq_official_webhook`）使用当前适配器的 `appid` 与目标用户的 OpenID 构造头像地址：`https://q.qlogo.cn/qqapp/{appid}/{user_id}/0`。`user_id` 应传入当前机器人收到的用户 ID，无需填写真实 QQ 号，也无需额外配置 `appid`。
+
 #### 🗣️ 典型交互示例
 - **用户**：“你看看我的头像是什么呀？”
   - **Bot**：*(自动调用 `inspect_user_avatar(user_id="<sender_id>")`)* -> “你的头像是一位有着银白色长发、红瞳的二次元动漫少女，看起来非常灵动可爱呢~”
@@ -122,6 +124,7 @@ astrbot_plugin_giftia_extool/
 │   ├── giftia_sync.py      # Giftia 插件实例检测与画像写入联动
 │   └── prompts.py          # 头像特征分析专用 Prompt 模板
 ├── tests/
+│   ├── test_avatar_fetcher.py # QQ 官方机器人头像下载兼容测试
 │   ├── test_avatar_tool.py # 头像工具测试
 │   └── test_avatar_monitor.py # 日期边界、变更检测与画像同步测试
 ├── _conf_schema.json       # 配置模式定义文件
