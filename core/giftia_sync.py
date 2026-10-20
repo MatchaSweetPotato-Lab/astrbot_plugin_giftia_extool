@@ -1,22 +1,30 @@
 from __future__ import annotations
 
 from typing import Any
+
 from astrbot.api import logger
 
 
 def get_giftia_instance() -> Any | None:
-    """安全获取运行中的 Giftia 插件实例"""
+    """Find the active Giftia instance in AstrBot's plugin metadata.
+
+    Returns:
+        Running Giftia plugin, or None when it is not ready.
+    """
     try:
         from astrbot.core.star.star_manager import star_map
-        if "giftia" in star_map:
-            return star_map["giftia"]
-        if "astrbot_plugin_giftia" in star_map:
-            return star_map["astrbot_plugin_giftia"]
-        for inst in star_map.values():
-            if hasattr(inst, "data_cache") and hasattr(inst.data_cache, "set_user_profile"):
-                return inst
+
+        for metadata in star_map.values():
+            if (
+                metadata.name not in ("giftia", "astrbot_plugin_giftia")
+                or not metadata.activated
+            ):
+                continue
+            instance = metadata.star_cls
+            if instance is not None and getattr(instance, "data_cache", None):
+                return instance
     except Exception as e:
-        logger.debug(f"[Giftia ExTool] 查找 Giftia 实例异常: {e}")
+        logger.debug("[Giftia ExTool] Giftia lookup failed: %s", e)
     return None
 
 
@@ -25,15 +33,41 @@ async def sync_avatar_to_giftia(
     avatar_description: str,
     bot_name: str = "",
     group_or_user_id: str = "",
+    existing_only: bool = False,
+    giftia: Any | None = None,
 ) -> bool:
-    """将头像描述同步写入 Giftia 的用户画像库中"""
-    giftia = get_giftia_instance()
-    if not giftia:
-        logger.debug("[Giftia ExTool] 未检测到运行中的 Giftia 插件，跳过画像同步。")
+    """Write an avatar field through Giftia's shared-profile cache interface.
+
+    Args:
+        user_id: Target user account ID.
+        avatar_description: Caption to save.
+        bot_name: Giftia bot configuration name, not an AstrBot adapter ID.
+        group_or_user_id: Source conversation, empty for shared-profile upkeep.
+        existing_only: Whether to skip users whose profiles have been deleted.
+        giftia: Running instance already resolved by a maintenance job.
+
+    Returns:
+        Whether the shared profile was successfully updated.
+    """
+    if giftia is None:
+        giftia = get_giftia_instance()
+    if giftia is None or not bot_name:
+        logger.debug(
+            "[Giftia ExTool] Giftia or bot mapping unavailable; skipping sync."
+        )
         return False
 
     try:
-        if hasattr(giftia, "data_cache") and hasattr(giftia.data_cache, "set_user_profile"):
+        if existing_only:
+            async with giftia.db.conn.execute(
+                "SELECT 1 FROM user_profiles WHERE bot_name = ? AND user_id = ?",
+                (bot_name, user_id),
+            ) as cursor:
+                if await cursor.fetchone() is None:
+                    return False
+        if hasattr(giftia, "data_cache") and hasattr(
+            giftia.data_cache, "set_user_profile"
+        ):
             await giftia.data_cache.set_user_profile(
                 bot_name=bot_name,
                 group_or_user_id=group_or_user_id,
@@ -41,8 +75,10 @@ async def sync_avatar_to_giftia(
                 profile_fields={"avatar_description": avatar_description},
                 alias_increment_count=False,
             )
-            logger.info(f"[Giftia ExTool] 已成功将用户 {user_id} 的头像描述同步写入 Giftia 画像库。")
+            logger.info(
+                "[Giftia ExTool] Avatar synced: bot=%s user=%s", bot_name, user_id
+            )
             return True
     except Exception as e:
-        logger.warning(f"[Giftia ExTool] 同步头像描述至 Giftia 画像库失败: {e}")
+        logger.warning("[Giftia ExTool] Avatar sync failed: %s", e)
     return False

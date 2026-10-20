@@ -43,6 +43,11 @@
   - 获取或命中头像特征后，自动将 `avatar_description` 写入 Giftia 用户画像数据库。
   - 让 Giftia 角色在后续日常对话中自然“记住”用户的外貌与头像特征。
 
+- 🕐 **每日活跃用户头像维护（默认关闭）**
+  - 每天北京时间 01:00 检查昨日发言且已建立 Giftia 共享画像的 QQ 用户。
+  - 使用完整图片的 SHA-256 判断变化，未变化且已同步的头像跳过视觉模型。
+  - 自动补全缺失描述、更新已变更头像；同一 QQ 号跨群、跨 Bot 复用识图结果。
+
 ---
 
 ## 📦 安装方法
@@ -70,7 +75,22 @@ git clone https://github.com/MatchaSweetPotato-Lab/astrbot_plugin_giftia_extool.
 | **avatar_config** | `object` | - | 头像查看工具配置组 |
 | ├─ `inspect_user_avatar_enabled` | `bool` | `true` | 是否启用头像查看工具（关闭后大模型将无法调用该工具） |
 | ├─ `caption_provider_ids` | `list` | `[]` | 视觉大模型提供商列表（按优先级排序）。若留空则自动使用当前默认视觉模型 |
-| └─ `auto_sync_to_giftia` | `bool` | `true` | 是否自动将分析得到的头像描述同步写入 Giftia 用户画像库 |
+| ├─ `auto_sync_to_giftia` | `bool` | `true` | 是否自动将分析得到的头像描述同步写入 Giftia 用户画像库；关闭时暂停每日检查 |
+| └─ `daily_avatar_check_enabled` | `bool` | `false` | 每天北京时间 01:00 检查昨日活跃且已有画像的 QQ 用户，与头像查看工具开关独立 |
+
+### 每日头像检查
+
+开启 `avatar_config.daily_avatar_check_enabled`，并保持 `auto_sync_to_giftia` 开启。检查任务复用 `caption_provider_ids`，未配置时使用 AstrBot 默认聊天模型，所选模型需要支持图片输入。
+
+任务以北京时间的自然日为范围，检查昨日 00:00 至今日 00:00 的用户发言；系统通知、操作日志、机器人自身消息和没有画像的用户不参与检查。新版 Giftia 按 `(bot_name, user_id)` 共享画像，同一 Bot 内任意群聊或私聊的发言均可触发该用户的维护，每个共享画像只更新一次。
+
+第一版支持绑定 OneBot / NapCat（`aiocqhttp`）适配器的 Giftia Bot。聊天记录没有独立的平台字段，因此混合绑定 QQ 与其他平台的 Bot 暂不参与，避免把其他平台的数字 ID 当作 QQ 号。检查时通过 OneBot 查询登录账号以排除机器人自身；依赖未就绪时稍后重试。
+
+头像固定使用 QQ 的 640 尺寸地址，不在下载失败时切换尺寸，以避免不同尺寸造成误判。旧缓存没有图片哈希时，会重新识图一次建立基线；后续图片未变时直接复用描述。识图缓存按 QQ 号共享，各 Bot 单独记录已同步指纹，因此某个 Bot 写回失败或稍后才活跃时，可以直接重用结果。
+
+下载或识图失败会保留旧记录，单个用户失败不会阻塞后续用户；失败的画像在下次被选中检查时重试。任务通过 Giftia 画像接口仅更新头像字段并刷新缓存，巡检不会为未建档用户创建画像。
+
+每天完成一轮后保存执行日期，重启不会重复执行已经完成的当天任务；若当天 01:00 后启动且尚未执行，会补跑一次。补跑只处理当前所对应的昨日，不追溯停机期间的其他日期。插件卸载时先取消检查任务，再关闭缓存数据库。检查结果记录在日志中。
 
 ---
 
@@ -97,11 +117,13 @@ git clone https://github.com/MatchaSweetPotato-Lab/astrbot_plugin_giftia_extool.
 astrbot_plugin_giftia_extool/
 ├── core/
 │   ├── avatar_fetcher.py   # 头像网络下载与视觉模型转述（含降级机制）
+│   ├── avatar_monitor.py   # 昨日活跃用户筛选与每日头像维护
 │   ├── database.py         # 基于 aiosqlite 的本地缓存持久化
 │   ├── giftia_sync.py      # Giftia 插件实例检测与画像写入联动
 │   └── prompts.py          # 头像特征分析专用 Prompt 模板
 ├── tests/
-│   └── test_avatar_tool.py # 单元测试
+│   ├── test_avatar_tool.py # 头像工具测试
+│   └── test_avatar_monitor.py # 日期边界、变更检测与画像同步测试
 ├── _conf_schema.json       # 配置模式定义文件
 ├── main.py                 # 插件入口与 LLM Tool 注册
 ├── metadata.yaml           # 插件元数据

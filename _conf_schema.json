@@ -2,7 +2,7 @@
   "avatar_config": {
     "description": "头像查看工具配置",
     "type": "object",
-    "hint": "用于配置 inspect_user_avatar 工具的开关、视觉模型提供商与画像同步行为。",
+    "hint": "配置头像查看工具、每日活跃用户头像检查、视觉模型提供商与画像同步行为。",
     "items": {
       "inspect_user_avatar_enabled": {
         "description": "启用头像查看工具",
@@ -22,6 +22,12 @@
         "type": "bool",
         "default": true,
         "hint": "开启后，转述生成的头像描述将自动同步写入 Giftia 插件的用户画像库中（需同时加载 Giftia 插件）。"
+      },
+      "daily_avatar_check_enabled": {
+        "description": "每日检查活跃用户头像",
+        "type": "bool",
+        "default": false,
+        "hint": "每天北京时间 01:00 检查昨日发言且已有 Giftia 画像的 QQ 用户，补全缺失描述并更新变更头像。同一 Bot 内共享画像只写入一次。关闭自动写入 Giftia 时暂停检查；与头像查看工具开关独立。首次检查会为旧记录重新识图建立指纹。"
       }
     }
   }

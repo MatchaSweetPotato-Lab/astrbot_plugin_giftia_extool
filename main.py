@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
+from contextlib import suppress
+from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -10,29 +13,32 @@ from astrbot.core import AstrBotConfig
 
 try:
     from .core.avatar_fetcher import AvatarFetcher
+    from .core.avatar_monitor import CHECK_TIMEZONE, check_active_avatars
     from .core.database import AvatarCacheDB
-    from .core.giftia_sync import sync_avatar_to_giftia
+    from .core.giftia_sync import get_giftia_instance, sync_avatar_to_giftia
 except ImportError:
     from core.avatar_fetcher import AvatarFetcher
+    from core.avatar_monitor import CHECK_TIMEZONE, check_active_avatars
     from core.database import AvatarCacheDB
-    from core.giftia_sync import sync_avatar_to_giftia
+    from core.giftia_sync import get_giftia_instance, sync_avatar_to_giftia
 
 
 @register("giftia_extool", "e.e.", "支持 giftia 的更多 llm 工具", "1.0.0")
 class GiftiaExTool(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
         super().__init__(context)
-        self.context: Context = context
         self.conf = config or {}
-
-        # 数据目录与 SQLite 缓存初始化
         data_dir = Path(StarTools.get_data_dir("astrbot_plugin_giftia_extool"))
-        db_path = data_dir / "avatar_cache.db"
-        self.db = AvatarCacheDB(db_path)
-        self.fetcher = AvatarFetcher(self.context)
+        self.db = AvatarCacheDB(data_dir / "avatar_cache.db")
+        self.fetcher = AvatarFetcher(context)
+        self._daily_task: asyncio.Task | None = None
 
     def _get_avatar_conf(self) -> dict:
-        """获取头像工具相关配置"""
+        """Read the avatar configuration group.
+
+        Returns:
+            Avatar options, or an empty mapping when unconfigured.
+        """
         if isinstance(self.conf, dict):
             return self.conf.get("avatar_config", {})
         return {}
@@ -56,25 +62,64 @@ class GiftiaExTool(Star):
         return bool(self.conf.get("auto_sync_to_giftia", True))
 
     async def initialize(self):
-        """插件初始化"""
+        """Initialize the cache, tool registration and optional daily task."""
         await self.db.initialize()
-
-        # 根据配置动态开启/关闭工具
-        enabled = self._is_tool_enabled()
-        if enabled:
-            if hasattr(self.context, "activate_llm_tool"):
-                try:
-                    self.context.activate_llm_tool("inspect_user_avatar")
-                except Exception:
-                    pass
-            logger.info("[Giftia ExTool] 已激活 inspect_user_avatar 工具。")
+        if self._is_tool_enabled():
+            self.context.activate_llm_tool("inspect_user_avatar")
+            logger.info("[Giftia ExTool] Avatar tool enabled.")
         else:
-            if hasattr(self.context, "deactivate_llm_tool"):
-                try:
-                    self.context.deactivate_llm_tool("inspect_user_avatar")
-                except Exception:
-                    pass
-            logger.info("[Giftia ExTool] inspect_user_avatar 工具已按配置停用。")
+            self.context.deactivate_llm_tool("inspect_user_avatar")
+            logger.info("[Giftia ExTool] Avatar tool disabled.")
+
+        if self._get_avatar_conf().get("daily_avatar_check_enabled", False):
+            self._daily_task = asyncio.create_task(
+                self._daily_avatar_loop(), name="giftia-daily-avatar-check"
+            )
+
+    async def _daily_avatar_loop(self) -> None:
+        """Run one pass per date after 01:00 UTC+08:00, including startup catch-up."""
+        while True:
+            delay = 60.0
+            try:
+                now = datetime.now(CHECK_TIMEZONE)
+                due = now.replace(hour=1, minute=0, second=0, microsecond=0)
+                enabled = self._get_avatar_conf().get(
+                    "daily_avatar_check_enabled", False
+                )
+                if enabled and self._is_auto_sync_enabled() and now >= due:
+                    today = now.date().isoformat()
+                    last_date = await self.get_kv_data("daily_avatar_check_date", "")
+                    if last_date != today:
+                        stats = await check_active_avatars(
+                            self.context,
+                            self.db,
+                            self.fetcher,
+                            self._get_caption_provider_ids(),
+                            now,
+                        )
+                        if stats is not None:
+                            await self.put_kv_data("daily_avatar_check_date", today)
+                            logger.info(
+                                "[Giftia ExTool] Daily avatar check complete: "
+                                "date=%s checked=%s filled=%s changed=%s "
+                                "baselined=%s unchanged=%s failed=%s",
+                                today,
+                                stats["checked"],
+                                stats["filled"],
+                                stats["changed"],
+                                stats["baselined"],
+                                stats["unchanged"],
+                                stats["failed"],
+                            )
+                elif now < due:
+                    delay = min(delay, (due - now).total_seconds())
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "[Giftia ExTool] Daily avatar check interrupted; retrying."
+                )
+            await asyncio.sleep(delay)
 
     @filter.llm_tool(name="inspect_user_avatar")
     async def inspect_user_avatar(
@@ -83,84 +128,92 @@ class GiftiaExTool(Star):
         user_id: str,
         force_refresh: bool = False,
     ) -> str:
-        """查看并分析指定用户的头像视觉特征。若之前已分析过且未指定强制刷新，将直接复用本地缓存。
+        """Inspect a user's avatar, reusing a cached visual description by default.
 
         Args:
-            user_id(string): 目标用户的数字ID/QQ号/用户唯一标识。
-            force_refresh(boolean): 是否强制重新下载头像并调用大模型重新转述（为 false 且已有缓存时直接返回缓存），默认 false。
+            user_id(string): User ID or QQ account; empty uses the sender's ID.
+            force_refresh(boolean): Download and caption again, default false.
+
+        Returns:
+            Avatar description or an explanation of the failure.
         """
         clean_user_id = str(user_id or "").strip()
-        if not clean_user_id:
-            if event and hasattr(event, "get_sender_id"):
-                clean_user_id = str(event.get_sender_id() or "").strip()
+        if not clean_user_id and event:
+            clean_user_id = str(event.get_sender_id() or "").strip()
         if not clean_user_id:
             return "查看头像失败：未提供有效的 user_id"
-
         if not self._is_tool_enabled():
             return "头像查看工具当前未启用。"
 
-        # 尝试解析会话信息（用于 Giftia 画像同步）
+        giftia = get_giftia_instance()
         bot_name = ""
-        group_or_user_id = ""
+        conversation_id = ""
+        cache_key = clean_user_id
         if event:
-            if hasattr(event, "get_group_id") and hasattr(event, "get_sender_id"):
-                group_or_user_id = event.get_group_id() or event.get_sender_id() or ""
-            platform_id = getattr(getattr(event, "platform_meta", None), "id", None)
-            if platform_id:
-                bot_name = str(platform_id)
+            conversation_id = str(event.get_group_id() or event.get_sender_id() or "")
+            platform_meta = getattr(event, "platform_meta", None)
+            platform_id = getattr(platform_meta, "id", "")
+            if giftia:
+                bot_name = giftia.adapter_id_map.get(platform_id, "")
+            platform_name = getattr(platform_meta, "name", "")
+            if isinstance(platform_name, str) and platform_name not in (
+                "",
+                "aiocqhttp",
+            ):
+                cache_key = f"{platform_name}:{platform_id}:{clean_user_id}"
 
-        # 1. 优先读取 SQLite 缓存
-        if not force_refresh:
-            cached_desc = await self.db.get_avatar_description(clean_user_id)
-            if cached_desc:
-                logger.info(f"[Giftia ExTool] 命中本地头像缓存: user_id={clean_user_id}")
-                # 尝试同步至 Giftia 画像
-                if self._is_auto_sync_enabled():
-                    await sync_avatar_to_giftia(
-                        user_id=clean_user_id,
-                        avatar_description=cached_desc,
-                        bot_name=bot_name,
-                        group_or_user_id=group_or_user_id,
-                    )
-                return f"用户 {clean_user_id} 的头像描述（本地缓存）:\n{cached_desc}"
-
-        # 2. 下载头像图片
-        logger.info(f"[Giftia ExTool] 开始下载用户 {clean_user_id} 的头像 (force_refresh={force_refresh})...")
-        image_bytes, avatar_url = await self.fetcher.download_avatar_bytes(
-            clean_user_id, event=event
-        )
-        if not image_bytes:
-            return f"获取用户 {clean_user_id} 的头像图片失败（可能受网络或平台限制影响）。"
-
-        # 3. 调用视觉大模型转述
-        providers = self._get_caption_provider_ids()
-        desc = await self.fetcher.caption_avatar_with_llm(
-            image_bytes=image_bytes,
-            provider_ids=providers,
-        )
-        if not desc:
-            return f"用户 {clean_user_id} 的头像转述失败（视觉大模型未返回有效描述）。"
-
-        # 4. 写入本地 SQLite 缓存
-        await self.db.save_avatar_description(
-            user_id=clean_user_id,
-            avatar_description=desc,
-            avatar_url=avatar_url,
-        )
-        logger.info(f"[Giftia ExTool] 用户 {clean_user_id} 的头像描述已更新至本地缓存表。")
-
-        # 5. 自动同步写入 Giftia 用户画像
-        if self._is_auto_sync_enabled():
-            await sync_avatar_to_giftia(
-                user_id=clean_user_id,
-                avatar_description=desc,
-                bot_name=bot_name,
-                group_or_user_id=group_or_user_id,
+        async with self.fetcher.user_locks[cache_key]:
+            cached = await self.db.get_avatar_record(cache_key, bot_name)
+            from_cache = bool(
+                cached and cached["avatar_description"] and not force_refresh
             )
+            if from_cache:
+                description = cached["avatar_description"]
+                avatar_url = cached["avatar_url"] or ""
+                avatar_hash = cached["avatar_hash"]
+            else:
+                image_bytes, avatar_url = await self.fetcher.download_avatar_bytes(
+                    clean_user_id, event=event
+                )
+                if not image_bytes:
+                    return f"获取用户 {clean_user_id} 的头像图片失败（可能受网络或平台限制影响）。"
+                avatar_hash = hashlib.sha256(image_bytes).hexdigest()
+                description = await self.fetcher.caption_avatar_with_llm(
+                    image_bytes=image_bytes,
+                    provider_ids=self._get_caption_provider_ids(),
+                )
+                if not description:
+                    return f"用户 {clean_user_id} 的头像转述失败（视觉大模型未返回有效描述）。"
+                await self.db.save_avatar_description(
+                    cache_key, description, avatar_url, avatar_hash
+                )
 
-        return f"用户 {clean_user_id} 的头像转述结果:\n{desc}"
+            if self._is_auto_sync_enabled() and bot_name:
+                success = await sync_avatar_to_giftia(
+                    user_id=clean_user_id,
+                    avatar_description=description,
+                    bot_name=bot_name,
+                    group_or_user_id=conversation_id,
+                    giftia=giftia,
+                )
+                if success and avatar_hash:
+                    await self.db.save_avatar_description(
+                        cache_key,
+                        description,
+                        avatar_url,
+                        avatar_hash,
+                        synced_bot_name=bot_name,
+                    )
+
+            label = "头像描述（本地缓存）" if from_cache else "头像转述结果"
+            return f"用户 {clean_user_id} 的{label}:\n{description}"
 
     async def terminate(self):
-        """插件销毁"""
+        """Cancel maintenance before closing the avatar database."""
+        if self._daily_task is not None:
+            self._daily_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._daily_task
+            self._daily_task = None
         await self.db.close()
-        logger.info("[Giftia ExTool] 插件已卸载，数据库连接已关闭。")
+        logger.info("[Giftia ExTool] Plugin stopped; avatar cache closed.")
