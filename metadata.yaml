@@ -1,4 +1,4 @@
-name: giftia_extool
+name: astrbot_plugin_giftia_extool
 display_name: Giftia ExTool
 desc: 支持 giftia 的更多 llm 工具
 version: 1.0.0
