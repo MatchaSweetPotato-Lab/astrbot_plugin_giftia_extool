@@ -13,12 +13,15 @@ import aiosqlite
 import pytest
 import pytest_asyncio
 from aiosqlite.context import contextmanager
-from PIL import Image
-
 from core.avatar_fetcher import AvatarFetcher
 from core.avatar_monitor import CHECK_TIMEZONE, check_active_avatars
 from core.database import AvatarCacheDB
 from core.giftia_sync import get_giftia_instance, sync_avatar_to_giftia
+from PIL import Image
+
+from astrbot.api.event import filter
+from astrbot.core.star.filter.command import CommandFilter
+from astrbot.core.star.star_handler import star_handlers_registry
 from main import GiftiaExTool
 
 
@@ -603,6 +606,159 @@ async def test_other_platform_numeric_id_does_not_reuse_qq_caption(
         await rt.cache.get_avatar_description("telegram:telegram:10001")
         == "current avatar"
     )
+
+
+@pytest.fixture
+def maintenance_plugin(runtime, monkeypatch):
+    monkeypatch.setattr(
+        "astrbot.api.star.StarTools.get_data_dir", lambda *args: runtime.tmp_path
+    )
+    plugin = GiftiaExTool(
+        runtime.context,
+        {
+            "avatar_config": {
+                "daily_avatar_check_enabled": False,
+                "inspect_user_avatar_enabled": False,
+                "caption_provider_ids": ["vision"],
+            }
+        },
+    )
+    plugin.db = runtime.cache
+    plugin.fetcher = runtime.fetcher
+    plugin.get_kv_data = AsyncMock(return_value="")
+    plugin.put_kv_data = AsyncMock()
+    return plugin
+
+
+@pytest.mark.parametrize("is_admin", [False, True])
+def test_manual_maintenance_requires_astrbot_administrator(is_admin):
+    handler = next(
+        handler
+        for handler in star_handlers_registry
+        if handler.handler is GiftiaExTool.maintain_avatars
+    )
+    command = next(
+        item for item in handler.event_filters if isinstance(item, CommandFilter)
+    )
+    assert command.command_name == "头像维护"
+    permission = next(
+        item
+        for item in handler.event_filters
+        if isinstance(item, filter.PermissionTypeFilter)
+    )
+    event = MagicMock()
+    event.is_admin.return_value = is_admin
+    assert permission.permission_type == filter.PermissionType.ADMIN
+    assert permission.filter(event, {}) is is_admin
+
+
+@pytest.mark.asyncio
+async def test_manual_maintenance_runs_before_schedule_and_can_repeat(
+    maintenance_plugin, runtime, monkeypatch
+):
+    plugin = maintenance_plugin
+    await runtime.seed("10001")
+    clock = MagicMock()
+    clock.now.return_value = runtime.now.replace(hour=0)
+    monkeypatch.setattr("main.datetime", clock)
+    event = SimpleNamespace(plain_result=lambda message: message)
+
+    replies = [reply async for reply in plugin.maintain_avatars(event)]
+    assert "开始头像维护" in replies[0]
+    assert "检查 1 位用户" in replies[-1]
+    assert "补全 1" in replies[-1]
+    runtime.writer.assert_awaited_once()
+    runtime.fetcher.caption_avatar_with_llm.assert_awaited_once_with(
+        b"image-v1", ["vision"]
+    )
+
+    replies = [reply async for reply in plugin.maintain_avatars(event)]
+    assert "未变化 1" in replies[-1]
+    assert runtime.fetcher.download_avatar_bytes.await_count == 2
+    runtime.fetcher.caption_avatar_with_llm.assert_awaited_once()
+    plugin.get_kv_data.assert_not_awaited()
+    plugin.put_kv_data.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["sync_disabled", "busy"])
+async def test_manual_maintenance_rejects_disabled_sync_or_busy_pass(
+    maintenance_plugin, monkeypatch, reason
+):
+    plugin = maintenance_plugin
+    if reason == "sync_disabled":
+        plugin.conf["avatar_config"]["auto_sync_to_giftia"] = False
+        expected = "auto_sync_to_giftia"
+    else:
+        await plugin._avatar_check_lock.acquire()
+        expected = "正在进行中"
+    check = AsyncMock()
+    monkeypatch.setattr("main.check_active_avatars", check)
+    event = SimpleNamespace(plain_result=lambda message: message)
+    try:
+        replies = [reply async for reply in plugin.maintain_avatars(event)]
+        assert len(replies) == 1
+        assert expected in replies[0]
+        check.assert_not_awaited()
+    finally:
+        if plugin._avatar_check_lock.locked():
+            plugin._avatar_check_lock.release()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["unready", "exception"])
+async def test_manual_maintenance_reports_failure_and_releases_lock(
+    maintenance_plugin, monkeypatch, failure
+):
+    plugin = maintenance_plugin
+    check = AsyncMock(return_value=None)
+    if failure == "exception":
+        check.side_effect = RuntimeError("Database unavailable")
+    monkeypatch.setattr("main.check_active_avatars", check)
+    event = SimpleNamespace(plain_result=lambda message: message)
+
+    replies = [reply async for reply in plugin.maintain_avatars(event)]
+    assert ("尚未就绪" if failure == "unready" else "维护失败") in replies[-1]
+    check.assert_awaited_once()
+    assert not plugin._avatar_check_lock.locked()
+    plugin.put_kv_data.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_manual_maintenance_prevents_overlapping_commands_and_daily_pass(
+    maintenance_plugin, runtime, monkeypatch
+):
+    plugin = maintenance_plugin
+    plugin.conf["avatar_config"]["daily_avatar_check_enabled"] = True
+    clock = MagicMock()
+    clock.now.return_value = runtime.now
+    monkeypatch.setattr("main.datetime", clock)
+    check = AsyncMock(
+        return_value=dict.fromkeys(
+            ("checked", "filled", "changed", "baselined", "unchanged", "failed"), 0
+        )
+    )
+    monkeypatch.setattr("main.check_active_avatars", check)
+    event = SimpleNamespace(plain_result=lambda message: message)
+    command = plugin.maintain_avatars(event)
+    try:
+        assert "开始头像维护" in await anext(command)
+        replies = [reply async for reply in plugin.maintain_avatars(event)]
+        assert "正在进行中" in replies[-1]
+        with patch(
+            "main.asyncio.sleep", new=AsyncMock(side_effect=asyncio.CancelledError)
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                await plugin._daily_avatar_loop()
+        check.assert_not_awaited()
+        plugin.put_kv_data.assert_not_awaited()
+
+        replies = [reply async for reply in command]
+        assert "检查 0 位用户" in replies[-1]
+        check.assert_awaited_once()
+        assert not plugin._avatar_check_lock.locked()
+    finally:
+        await command.aclose()
 
 
 @pytest.mark.asyncio

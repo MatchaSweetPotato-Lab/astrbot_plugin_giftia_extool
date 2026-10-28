@@ -32,6 +32,7 @@ class GiftiaExTool(Star):
         self.db = AvatarCacheDB(data_dir / "avatar_cache.db")
         self.fetcher = AvatarFetcher(context)
         self._daily_task: asyncio.Task | None = None
+        self._avatar_check_lock = asyncio.Lock()
 
     def _get_avatar_conf(self) -> dict:
         """Read the avatar configuration group.
@@ -89,28 +90,29 @@ class GiftiaExTool(Star):
                 if enabled and self._is_auto_sync_enabled() and now >= due:
                     today = now.date().isoformat()
                     last_date = await self.get_kv_data("daily_avatar_check_date", "")
-                    if last_date != today:
-                        stats = await check_active_avatars(
-                            self.context,
-                            self.db,
-                            self.fetcher,
-                            self._get_caption_provider_ids(),
-                            now,
-                        )
-                        if stats is not None:
-                            await self.put_kv_data("daily_avatar_check_date", today)
-                            logger.info(
-                                "[Giftia ExTool] Daily avatar check complete: "
-                                "date=%s checked=%s filled=%s changed=%s "
-                                "baselined=%s unchanged=%s failed=%s",
-                                today,
-                                stats["checked"],
-                                stats["filled"],
-                                stats["changed"],
-                                stats["baselined"],
-                                stats["unchanged"],
-                                stats["failed"],
+                    if last_date != today and not self._avatar_check_lock.locked():
+                        async with self._avatar_check_lock:
+                            stats = await check_active_avatars(
+                                self.context,
+                                self.db,
+                                self.fetcher,
+                                self._get_caption_provider_ids(),
+                                now,
                             )
+                            if stats is not None:
+                                await self.put_kv_data("daily_avatar_check_date", today)
+                                logger.info(
+                                    "[Giftia ExTool] Daily avatar check complete: "
+                                    "date=%s checked=%s filled=%s changed=%s "
+                                    "baselined=%s unchanged=%s failed=%s",
+                                    today,
+                                    stats["checked"],
+                                    stats["filled"],
+                                    stats["changed"],
+                                    stats["baselined"],
+                                    stats["unchanged"],
+                                    stats["failed"],
+                                )
                 elif now < due:
                     delay = min(delay, (due - now).total_seconds())
             except asyncio.CancelledError:
@@ -120,6 +122,55 @@ class GiftiaExTool(Star):
                     "[Giftia ExTool] Daily avatar check interrupted; retrying."
                 )
             await asyncio.sleep(delay)
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("头像维护")
+    async def maintain_avatars(self, event: AstrMessageEvent):
+        """Run avatar maintenance immediately, independently of the daily schedule.
+
+        Args:
+            event: Administrator command event receiving progress and results.
+
+        Yields:
+            Progress, maintenance counts, or an explanation of the failure.
+        """
+        if not self._is_auto_sync_enabled():
+            yield event.plain_result(
+                "头像维护未执行：请先在插件配置中开启 auto_sync_to_giftia。"
+            )
+            return
+        if self._avatar_check_lock.locked():
+            yield event.plain_result("头像维护正在进行中，请等待本轮完成。")
+            return
+
+        async with self._avatar_check_lock:
+            yield event.plain_result(
+                "开始头像维护：检查昨日活跃且已有 Giftia 画像的 QQ 用户，请稍候。"
+            )
+            try:
+                stats = await check_active_avatars(
+                    self.context,
+                    self.db,
+                    self.fetcher,
+                    self._get_caption_provider_ids(),
+                    datetime.now(CHECK_TIMEZONE),
+                )
+            except Exception:
+                logger.exception("[Giftia ExTool] Manual avatar check failed.")
+                yield event.plain_result("头像维护失败，请查看日志并稍后重试。")
+                return
+
+        if stats is None:
+            yield event.plain_result(
+                "头像维护未完成：Giftia 数据库或 QQ 适配器尚未就绪，请稍后重试。"
+            )
+            return
+        yield event.plain_result(
+            f"头像维护完成：检查 {stats['checked']} 位用户。\n"
+            f"画像统计：补全 {stats['filled']}，更新 {stats['changed']}，"
+            f"建立指纹 {stats['baselined']}，未变化 {stats['unchanged']}，"
+            f"失败 {stats['failed']}。"
+        )
 
     @filter.llm_tool(name="inspect_user_avatar")
     async def inspect_user_avatar(
