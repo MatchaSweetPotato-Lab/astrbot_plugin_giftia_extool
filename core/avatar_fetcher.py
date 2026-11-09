@@ -4,7 +4,6 @@ import asyncio
 import base64
 import hashlib
 import json
-import re
 from collections import defaultdict
 from io import BytesIO
 
@@ -141,13 +140,15 @@ class AvatarFetcher:
                     )
                     continue
 
-                raw_text = str(llm_resp.completion_text).strip()
-                description = self._parse_caption_text(raw_text)
+                description = self._parse_caption_text(llm_resp.completion_text)
                 if description:
                     logger.info(
                         "[Giftia ExTool] Avatar caption ready: provider=%s", pid
                     )
                     return description
+                logger.warning(
+                    "[Giftia ExTool] Invalid caption JSON from provider %s", pid
+                )
             except Exception as e:
                 logger.error(
                     "[Giftia ExTool] Caption provider %s failed: %s",
@@ -161,32 +162,28 @@ class AvatarFetcher:
 
     @staticmethod
     def _parse_caption_text(raw: str) -> str:
-        """Parse a caption from JSON or plain text.
+        """Validate the complete JSON response before accepting a caption.
 
         Args:
             raw: Provider completion text.
 
         Returns:
-            Cleaned caption, or an empty string when no content is available.
+            A trimmed caption of at most 80 characters, or an empty string
+            when the response does not match the required JSON object.
         """
-        if not raw:
+        if not isinstance(raw, str):
             return ""
 
-        # Prefer the caption field when the model returns JSON.
-        json_match = re.search(r"\{.*?\}", raw, re.DOTALL)
-        if json_match:
-            try:
-                data = json.loads(json_match.group(0))
-                for key in ("avatar_description", "caption", "description", "summary"):
-                    caption = data.get(key)
-                    if isinstance(caption, str) and caption.strip():
-                        return caption.strip()
-                return ""
-            except Exception:
-                pass
-
-        # Strip Markdown fences from plain-text responses.
-        cleaned = raw.strip("` \n\r\t")
-        if cleaned.startswith("json"):
-            cleaned = cleaned[4:].strip()
-        return cleaned
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, RecursionError):
+            return ""
+        if not isinstance(data, dict) or set(data) != {"avatar_description"}:
+            return ""
+        caption = data["avatar_description"]
+        if not isinstance(caption, str):
+            return ""
+        caption = caption.strip()
+        if not caption or len(caption) > 80:
+            return ""
+        return caption

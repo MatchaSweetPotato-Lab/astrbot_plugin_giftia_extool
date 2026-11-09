@@ -68,14 +68,14 @@ class AvatarCacheDBTests(unittest.IsolatedAsyncioTestCase):
 
 class AvatarFetcherTests(unittest.TestCase):
     def test_parse_caption_text_json(self):
-        raw_json = '```json\n{\n  "avatar_description": "黑猫趴在窗台上晒太阳"\n}\n```'
+        raw_json = '{\n  "avatar_description": "黑猫趴在窗台上晒太阳"\n}'
         parsed = AvatarFetcher._parse_caption_text(raw_json)
         self.assertEqual(parsed, "黑猫趴在窗台上晒太阳")
 
     def test_parse_caption_text_plain(self):
         raw_text = "这是一张二次元机甲头像，科技感很强"
         parsed = AvatarFetcher._parse_caption_text(raw_text)
-        self.assertEqual(parsed, "这是一张二次元机甲头像，科技感很强")
+        self.assertEqual(parsed, "")
 
 
 class GiftiaExToolMainTests(unittest.IsolatedAsyncioTestCase):

@@ -116,7 +116,7 @@ class AvatarCacheDB:
             return
         clean_user_id = str(user_id or "").strip()
         clean_desc = str(avatar_description or "").strip()
-        if not clean_user_id or not clean_desc:
+        if not clean_user_id or not clean_desc or len(clean_desc) > 80:
             return
 
         now_str = datetime.now().isoformat()
@@ -153,6 +153,43 @@ class AvatarCacheDB:
                     (synced_bot_name, clean_user_id, avatar_hash, now_str),
                 )
             await self.conn.commit()
+
+    async def delete_oversized_descriptions(self) -> int:
+        """Delete captions longer than 80 characters and their sync fingerprints.
+
+        Returns:
+            Number of avatar cache records deleted.
+
+        Raises:
+            RuntimeError: If the cache database is not initialized.
+            aiosqlite.Error: If the cleanup cannot be committed.
+        """
+        if not self.conn:
+            raise RuntimeError("Avatar cache database is not initialized")
+
+        async with self._lock:
+            async with self.conn.execute(
+                "SELECT user_id, avatar_description FROM avatar_cache"
+            ) as cursor:
+                user_ids = [
+                    (row["user_id"],)
+                    async for row in cursor
+                    if len(row["avatar_description"]) > 80
+                ]
+            if not user_ids:
+                return 0
+            try:
+                await self.conn.executemany(
+                    "DELETE FROM avatar_sync_state WHERE user_id = ?", user_ids
+                )
+                await self.conn.executemany(
+                    "DELETE FROM avatar_cache WHERE user_id = ?", user_ids
+                )
+                await self.conn.commit()
+            except BaseException:
+                await self.conn.rollback()
+                raise
+        return len(user_ids)
 
     async def close(self) -> None:
         """Close the SQLite connection."""

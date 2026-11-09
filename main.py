@@ -172,6 +172,31 @@ class GiftiaExTool(Star):
             f"失败 {stats['failed']}。"
         )
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("清理头像缓存")
+    async def clear_avatar_cache(self, event: AstrMessageEvent):
+        """Remove avatar cache records whose descriptions exceed 80 characters.
+
+        Args:
+            event: Administrator command event receiving the cleanup result.
+
+        Yields:
+            Number of deleted cache records, or an explanation of the failure.
+        """
+        try:
+            deleted = await self.db.delete_oversized_descriptions()
+        except Exception:
+            logger.exception("[Giftia ExTool] Avatar cache cleanup failed.")
+            yield event.plain_result("头像缓存清理失败，请查看日志并稍后重试。")
+            return
+        logger.info(
+            "[Giftia ExTool] Avatar cache cleanup complete: deleted=%s", deleted
+        )
+        yield event.plain_result(
+            f"头像缓存清理完成：已删除 {deleted} 条超过80个字符的转述缓存，"
+            "并清除对应的同步指纹。后续查看或维护时会重新识图。"
+        )
+
     @filter.llm_tool(name="inspect_user_avatar")
     async def inspect_user_avatar(
         self,
